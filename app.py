@@ -1,190 +1,184 @@
 import streamlit as st
-import pandas as pd
 import yfinance as yf
-import plotly.graph_objects as go
-import datetime
+import pandas as pd
+import plotly.graph_objects as plotly_go
+from datetime import datetime, timedelta
 
-# --- 頁面設定 ---
-st.set_page_config(page_title="TG Capital 三叉戟交易策略分析", layout="wide")
-st.title("🔱 TG Capital: 倫敦殺戮區 30分K 三叉戟交易策略 (Trident Pattern)")
+# ==========================================
+# 1. 網頁基本設定 & 顯示交易邏輯
+# ==========================================
+st.set_page_config(page_title="SMC 交易策略儀表板", layout="wide")
 
-# --- 側邊欄參數設定 ---
-st.sidebar.header("參數設定")
-
-# 1. 改為下拉選單 (Selectbox)
-ticker_mapping = {
-    "Bitcoin vs US Dollar": "BTC-USD",
-    "Gold vs US Dollar": "GC=F",
-    "Euro vs US Dollar": "EURUSD=X"
-}
-selected_asset = st.sidebar.selectbox("選擇商品", options=list(ticker_mapping.keys()))
-ticker = ticker_mapping[selected_asset]
-
-days = st.sidebar.slider("抓取天數 (yfinance 30mK線最多60天)", 5, 60, 30)
-
-# --- 策略邏輯說明 ---
+st.title("📈 SMC (FVG + BOS) 交易策略訊號儀表板")
 st.markdown("""
-### 📜 交易邏輯說明 (根據影片整理)
-1. **交易時間**：紐約時間 03:00 AM - 06:30 AM (London Kill Zone)。
-2. **均線過濾**：EMA 5, 9, 13, 21 必須呈現完美多頭排列 (5 > 9 > 13 > 21)。
-3. **價格行為 (Trident Pattern)**：
-   * 出現 **十字星 (Doji)** 或長下影線 (模擬回踩 FVG 50% 拒絕)。
-   * **確認信號**：十字星的下一根 K 線，其 **收盤價必須高於** 十字星的最高價。
-4. **出場設置**：
-   * **止損 (SL)**：十字星的最低點下方。
-   * **止盈 (TP)**：預設 1:10 盈虧比 (影片中提倡高盈虧比 1:20 甚至 1:50)。
----
+### 🧠 畫面上交易邏輯 (參考影片策略)：
+1. **Step 1: 尋找高勝率區間** 
+   - 尋找價格產生 **結構破壞 (BOS)** 的強烈推動。
+   - 確認該推動產生了 **失衡區 (FVG / Fair Value Gap)** (第一根K線的高/低點與第三根K線的高/低點不重疊)。
+2. **Step 2: 等待回踩與尊重 (Respect)**
+   - 等待價格回調進入 FVG 區間。
+   - K 線的**實體 (Body)** 不能收盤超過 FVG 的邊界 (代表市場尊重該失衡區)。
+3. **Step 3: 進場確認與設定**
+   - 等待一根 K 線順勢**收盤於 FVG 之外**作為確認訊號。
+   - **止損 (SL)** 設在確認K線的極值或近期高低點。
+   - **止盈 (TP)** 設定為 1:2 的盈虧比 (Risk-Reward Ratio)。
 """)
 
-# --- 獲取資料函數 (加入快取時間與錯誤處理) ---
-@st.cache_data(ttl=3600) # 快取 1 小時，避免頻繁請求觸發 Rate Limit
-def load_data(ticker, days):
-    try:
-        # 抓取 30 分鐘 K 線
-        df = yf.download(ticker, period=f"{days}d", interval="30m")
-        
-        if df is None or df.empty:
-            return None, "找不到該商品的資料，或已達到 Yahoo Finance 請求上限，請稍後再試。"
-        
-        # 處理新版 yfinance 可能回傳 MultiIndex 欄位的問題
-        if isinstance(df.columns, pd.MultiIndex):
-            df.columns = df.columns.get_level_values(0)
-            
-        df.dropna(inplace=True)
-        
-        # 計算 EMA
-        df['EMA_5'] = df['Close'].ewm(span=5, adjust=False).mean()
-        df['EMA_9'] = df['Close'].ewm(span=9, adjust=False).mean()
-        df['EMA_13'] = df['Close'].ewm(span=13, adjust=False).mean()
-        df['EMA_21'] = df['Close'].ewm(span=21, adjust=False).mean()
-        
-        # 判斷多頭排列
-        df['EMA_Stacked_Bull'] = (df['EMA_5'] > df['EMA_9']) & (df['EMA_9'] > df['EMA_13']) & (df['EMA_13'] > df['EMA_21'])
-        
-        # 計算 K 線特徵
-        df['Body'] = abs(df['Close'] - df['Open'])
-        df['Lower_Wick'] = df[['Open', 'Close']].min(axis=1) - df['Low']
-        df['Upper_Wick'] = df['High'] - df[['Open', 'Close']].max(axis=1)
-        
-        # 定義十字星 / 長下影線 (下影線大於實體2倍，且大於上影線)
-        df['Is_Doji_Pinbar'] = (df['Lower_Wick'] > df['Body'] * 2) & (df['Lower_Wick'] > df['Upper_Wick'])
-        
-        return df, None
-        
-    except Exception as e:
-        return None, f"Yahoo Finance API 發生錯誤 (可能是請求過於頻繁): {str(e)}"
+# ==========================================
+# 2. 側邊欄設定 (資產與時間週期)
+# ==========================================
+st.sidebar.header("⚙️ 參數設定")
+assets = {
+    "Bitcoin (BTC/USD)": "BTC-USD",
+    "Gold (XAU/USD)": "GC=F",
+    "Euro (EUR/USD)": "EURUSD=X"
+}
+selected_asset = st.sidebar.selectbox("選擇交易商品", list(assets.keys()))
+ticker = assets[selected_asset]
 
-# --- 產生交易信號 ---
-def generate_signals(df):
-    signals =[]
-    # 為了避免迴圈越界，迴圈到最後第二根
-    for i in range(1, len(df) - 1):
-        prev_candle = df.iloc[i]
-        curr_candle = df.iloc[i+1]
-        
-        # 1. 確保在前一根K線均線多頭排列
-        if not prev_candle['EMA_Stacked_Bull']:
-            continue
+timeframes = {"15 分鐘": "15m", "1 小時": "1h", "4 小時": "4h", "1 天": "1d"}
+selected_tf = st.sidebar.selectbox("選擇時間週期", list(timeframes.keys()))
+interval = timeframes[selected_tf]
+
+# 下載資料
+@st.cache_data(ttl=300) # 快取5分鐘
+def load_data(ticker, interval):
+    # 根據週期抓取足夠的資料
+    period = "60d" if interval in["15m", "1h"] else "1y"
+    df = yf.download(ticker, period=period, interval=interval)
+    df.dropna(inplace=True)
+    return df
+
+with st.spinner("載入市場數據中..."):
+    df = load_data(ticker, interval)
+
+# ==========================================
+# 3. 核心演算法：尋找 FVG 與模擬進場訊號
+# ==========================================
+def detect_smc_signals(df):
+    df = df.copy()
+    df['FVG_Bull'] = False
+    df['FVG_Bear'] = False
+    df['Signal'] = None
+    df['Entry'] = 0.0
+    df['SL'] = 0.0
+    df['TP'] = 0.0
+    
+    # 掃描資料尋找 FVG 與進場訊號 (簡化版演算法)
+    for i in range(2, len(df) - 2):
+        # Bullish FVG (看漲失衡區): K線1的High < K線3的Low
+        if df['High'].iloc[i-2] < df['Low'].iloc[i]:
+            fvg_top = df['Low'].iloc[i]
+            fvg_bottom = df['High'].iloc[i-2]
             
-        # 2. 前一根必須是 十字星/長下影線 (Doji)
-        if not prev_candle['Is_Doji_Pinbar']:
-            continue
-            
-        # 3. 確認信號：當前K線收盤必須「大於」十字星的最高點
-        if curr_candle['Close'] > prev_candle['High']:
-            
-            entry_price = curr_candle['Close']
-            stop_loss = prev_candle['Low'] # 止損放在十字星低點
-            risk = entry_price - stop_loss
-            
-            if risk <= 0: continue
+            # 檢查後續幾根K線是否回踩且收盤於FVG外 (Step 2 & 3)
+            if df['Low'].iloc[i+1] <= fvg_top and df['Close'].iloc[i+1] > fvg_top:
+                # 產生做多訊號
+                entry_price = df['Close'].iloc[i+1]
+                sl_price = df['Low'].iloc[i+1] - (entry_price * 0.001) # 止損設在信號K線低點下方
+                risk = entry_price - sl_price
+                tp_price = entry_price + (risk * 2) # 1:2 盈虧比
                 
-            take_profit = entry_price + (risk * 10) # 預設 1:10 盈虧比
-            
-            signals.append({
-                'Time': df.index[i+1],
-                'Entry': entry_price,
-                'SL': stop_loss,
-                'TP': take_profit,
-                'Doji_Time': df.index[i]
-            })
-            
-    return signals
+                df.at[df.index[i+1], 'Signal'] = 'BUY'
+                df.at[df.index[i+1], 'Entry'] = entry_price
+                df.at[df.index[i+1], 'SL'] = sl_price
+                df.at[df.index[i+1], 'TP'] = tp_price
 
-# --- 執行與繪圖 ---
-with st.spinner('正在從 Yahoo Finance 獲取數據，請稍候...'):
-    df, error_msg = load_data(ticker, days)
+        # Bearish FVG (看跌失衡區): K線1的Low > K線3的High
+        elif df['Low'].iloc[i-2] > df['High'].iloc[i]:
+            fvg_top = df['Low'].iloc[i-2]
+            fvg_bottom = df['High'].iloc[i]
+            
+            # 檢查回踩
+            if df['High'].iloc[i+1] >= fvg_bottom and df['Close'].iloc[i+1] < fvg_bottom:
+                # 產生做空訊號
+                entry_price = df['Close'].iloc[i+1]
+                sl_price = df['High'].iloc[i+1] + (entry_price * 0.001) # 止損設在信號K線高點上方
+                risk = sl_price - entry_price
+                tp_price = entry_price - (risk * 2) # 1:2 盈虧比
+                
+                df.at[df.index[i+1], 'Signal'] = 'SELL'
+                df.at[df.index[i+1], 'Entry'] = entry_price
+                df.at[df.index[i+1], 'SL'] = sl_price
+                df.at[df.index[i+1], 'TP'] = tp_price
 
-if error_msg:
-    # 顯示錯誤訊息 (避免紅字當機)
-    st.error(error_msg)
-    st.info("💡 提示：如果你頻繁重整頁面，Yahoo Finance 會暫時封鎖你的 IP。請等待約 5~10 分鐘後再試。")
-elif df is not None and not df.empty:
-    signals = generate_signals(df)
+    return df
+
+df_signals = detect_smc_signals(df)
+
+# ==========================================
+# 4. 最新訊號提示區塊
+# ==========================================
+recent_signals = df_signals.dropna(subset=['Signal']).tail(1)
+
+st.subheader(f"🚨 最新交易訊號 ({selected_asset})")
+if not recent_signals.empty:
+    sig_time = recent_signals.index[0]
+    sig_type = recent_signals['Signal'].values[0]
+    entry = recent_signals['Entry'].values[0]
+    sl = recent_signals['SL'].values[0]
+    tp = recent_signals['TP'].values[0]
     
-    if len(signals) > 0:
-        st.success(f"✅ 在圖表中找到了 {len(signals)} 個潛在的三叉戟做多信號！(圖表上以綠色箭頭標示)")
+    color = "green" if sig_type == 'BUY' else "red"
+    st.markdown(f"""
+    <div style="background-color:rgba({0 if sig_type=='BUY' else 255}, {255 if sig_type=='BUY' else 0}, 0, 0.1); padding:20px; border-radius:10px; border-left: 5px solid {color};">
+        <h3 style="color:{color}; margin-top:0;">{sig_type} 訊號觸發!</h3>
+        <b>時間:</b> {sig_time.strftime('%Y-%m-%d %H:%M')}<br>
+        <b>進場價位 (Entry):</b> ${entry:.2f}<br>
+        <b>止損價位 (SL):</b> ${sl:.2f}<br>
+        <b>止盈價位 (TP):</b> ${tp:.2f} (盈虧比 1:2)
+    </div>
+    """, unsafe_allow_html=True)
+else:
+    st.info("目前所選週期尚未出現符合 FVG 策略的最新訊號。")
+
+# ==========================================
+# 5. 繪製圖表 (包含K線、訊號標示、止損止盈線)
+# ==========================================
+st.subheader("📊 互動式圖表")
+
+# 為了畫面簡潔，只繪製最後 150 根 K 線
+plot_df = df_signals.tail(150)
+
+fig = plotly_go.Figure()
+
+# 繪製 K 線圖
+fig.add_trace(plotly_go.Candlestick(
+    x=plot_df.index,
+    open=plot_df['Open'],
+    high=plot_df['High'],
+    low=plot_df['Low'],
+    close=plot_df['Close'],
+    name='K線'
+))
+
+# 在圖表上標記訊號、止損、止盈
+for idx, row in plot_df.dropna(subset=['Signal']).iterrows():
+    # 進場點箭頭
+    if row['Signal'] == 'BUY':
+        fig.add_annotation(x=idx, y=row['Low'], text="⬆ BUY", showarrow=True, arrowhead=1, arrowcolor="green", font=dict(color="green", size=14))
     else:
-        st.warning("⚠️ 根據目前邏輯，在選定期間內沒有找到符合條件的信號。")
-
-    # 建立 Plotly K線圖
-    fig = go.Figure(data=[go.Candlestick(x=df.index,
-                    open=df['Open'], high=df['High'],
-                    low=df['Low'], close=df['Close'],
-                    name='K線')])
-
-    # 加入 EMA 線
-    fig.add_trace(go.Scatter(x=df.index, y=df['EMA_5'], line=dict(color='blue', width=1), name='EMA 5'))
-    fig.add_trace(go.Scatter(x=df.index, y=df['EMA_9'], line=dict(color='green', width=1), name='EMA 9'))
-    fig.add_trace(go.Scatter(x=df.index, y=df['EMA_13'], line=dict(color='orange', width=1), name='EMA 13'))
-    fig.add_trace(go.Scatter(x=df.index, y=df['EMA_21'], line=dict(color='red', width=1), name='EMA 21'))
-
-    # 標示信號與止損止盈
-    for sig in signals:
-        # 標示進場點箭頭
-        fig.add_annotation(
-            x=sig['Time'], y=sig['Entry'],
-            text="BUY", showarrow=True, arrowhead=1,
-            arrowcolor="green", arrowsize=2, arrowwidth=2,
-            font=dict(color="white", size=10), bgcolor="green"
-        )
-        
-        # 繪製 SL 與 TP 的水平線段 (從進場點向右延伸一點點方便觀看)
-        time_entry = sig['Time']
-        time_end = time_entry + datetime.timedelta(hours=10) # 往右畫10小時的長度
-        
-        # 進場線 (白色虛線)
-        fig.add_shape(type="line", x0=time_entry, x1=time_end, y0=sig['Entry'], y1=sig['Entry'],
-                      line=dict(color="white", width=2, dash="dash"))
-        
-        # 止損線 (紅色實線)
-        fig.add_shape(type="line", x0=time_entry, x1=time_end, y0=sig['SL'], y1=sig['SL'],
-                      line=dict(color="red", width=2))
-        fig.add_annotation(x=time_end, y=sig['SL'], text=f"SL: {sig['SL']:.2f}", showarrow=False, font=dict(color="red"))
-        
-        # 止盈線 (綠色實線)
-        fig.add_shape(type="line", x0=time_entry, x1=time_end, y0=sig['TP'], y1=sig['TP'],
-                      line=dict(color="lightgreen", width=2))
-        fig.add_annotation(x=time_end, y=sig['TP'], text=f"TP(1:10): {sig['TP']:.2f}", showarrow=False, font=dict(color="lightgreen"))
-
-    # 圖表排版設定
-    fig.update_layout(
-        title=f"{selected_asset} ({ticker}) 30分鐘圖 - 三叉戟進場點標示",
-        yaxis_title="Price",
-        xaxis_title="Time",
-        template="plotly_dark",
-        height=700,
-        xaxis_rangeslider_visible=False
-    )
+        fig.add_annotation(x=idx, y=row['High'], text="⬇ SELL", showarrow=True, arrowhead=1, arrowcolor="red", font=dict(color="red", size=14))
     
-    st.plotly_chart(fig, use_container_width=True)
+    # 畫止損(SL)虛線
+    fig.add_shape(type="line", x0=idx, y0=row['SL'], x1=plot_df.index[-1], y1=row['SL'],
+                  line=dict(color="red", width=2, dash="dash"))
+    fig.add_annotation(x=plot_df.index[-5], y=row['SL'], text=f"SL: {row['SL']:.2f}", showarrow=False, font=dict(color="red"))
 
-    # 顯示信號數據表
-    if len(signals) > 0:
-        st.markdown("### 📊 詳細信號數據")
-        sig_df = pd.DataFrame(signals)
-        # 格式化顯示價格 (保留小數點)
-        sig_df['Entry'] = sig_df['Entry'].apply(lambda x: f"{x:.4f}")
-        sig_df['SL'] = sig_df['SL'].apply(lambda x: f"{x:.4f}")
-        sig_df['TP'] = sig_df['TP'].apply(lambda x: f"{x:.4f}")
-        st.dataframe(sig_df)
+    # 畫止盈(TP)虛線
+    fig.add_shape(type="line", x0=idx, y0=row['TP'], x1=plot_df.index[-1], y1=row['TP'],
+                  line=dict(color="green", width=2, dash="dash"))
+    fig.add_annotation(x=plot_df.index[-5], y=row['TP'], text=f"TP: {row['TP']:.2f}", showarrow=False, font=dict(color="green"))
+
+# 圖表外觀設定
+fig.update_layout(
+    xaxis_rangeslider_visible=False,
+    template="plotly_dark",
+    height=600,
+    margin=dict(l=0, r=0, t=30, b=0),
+    yaxis_title="價格 (USD)"
+)
+
+st.plotly_chart(fig, use_container_width=True)
+
+st.caption("聲明：SMC 策略之結構破壞(BOS)判定具主觀性，本程式採用簡化版 FVG 演算法生成提示，僅供學習參考，不構成投資建議。")
