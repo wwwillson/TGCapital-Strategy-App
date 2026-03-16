@@ -10,7 +10,16 @@ st.title("🔱 TG Capital: 倫敦殺戮區 30分K 三叉戟交易策略 (Trident
 
 # --- 側邊欄參數設定 ---
 st.sidebar.header("參數設定")
-ticker = st.sidebar.text_input("輸入商品代號 (例如: GC=F 黃金, EURUSD=X)", "GC=F")
+
+# 1. 改為下拉選單 (Selectbox)
+ticker_mapping = {
+    "Bitcoin vs US Dollar": "BTC-USD",
+    "Gold vs US Dollar": "GC=F",
+    "Euro vs US Dollar": "EURUSD=X"
+}
+selected_asset = st.sidebar.selectbox("選擇商品", options=list(ticker_mapping.keys()))
+ticker = ticker_mapping[selected_asset]
+
 days = st.sidebar.slider("抓取天數 (yfinance 30mK線最多60天)", 5, 60, 30)
 
 # --- 策略邏輯說明 ---
@@ -27,33 +36,43 @@ st.markdown("""
 ---
 """)
 
-# --- 獲取資料函數 ---
-@st.cache_data
+# --- 獲取資料函數 (加入快取時間與錯誤處理) ---
+@st.cache_data(ttl=3600) # 快取 1 小時，避免頻繁請求觸發 Rate Limit
 def load_data(ticker, days):
-    # 抓取 30 分鐘 K 線
-    df = yf.download(ticker, period=f"{days}d", interval="30m")
-    if df.empty:
-        return df
-    
-    # 計算 EMA
-    df['EMA_5'] = df['Close'].ewm(span=5, adjust=False).mean()
-    df['EMA_9'] = df['Close'].ewm(span=9, adjust=False).mean()
-    df['EMA_13'] = df['Close'].ewm(span=13, adjust=False).mean()
-    df['EMA_21'] = df['Close'].ewm(span=21, adjust=False).mean()
-    
-    # 判斷多頭排列
-    df['EMA_Stacked_Bull'] = (df['EMA_5'] > df['EMA_9']) & (df['EMA_9'] > df['EMA_13']) & (df['EMA_13'] > df['EMA_21'])
-    
-    # 計算 K 線特徵
-    df['Body'] = abs(df['Close'] - df['Open'])
-    df['Lower_Wick'] = df[['Open', 'Close']].min(axis=1) - df['Low']
-    df['Upper_Wick'] = df['High'] - df[['Open', 'Close']].max(axis=1)
-    df['Total_Range'] = df['High'] - df['Low']
-    
-    # 定義十字星 / 長下影線 (下影線大於實體2倍，且大於上影線)
-    df['Is_Doji_Pinbar'] = (df['Lower_Wick'] > df['Body'] * 2) & (df['Lower_Wick'] > df['Upper_Wick'])
-    
-    return df
+    try:
+        # 抓取 30 分鐘 K 線
+        df = yf.download(ticker, period=f"{days}d", interval="30m")
+        
+        if df is None or df.empty:
+            return None, "找不到該商品的資料，或已達到 Yahoo Finance 請求上限，請稍後再試。"
+        
+        # 處理新版 yfinance 可能回傳 MultiIndex 欄位的問題
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = df.columns.get_level_values(0)
+            
+        df.dropna(inplace=True)
+        
+        # 計算 EMA
+        df['EMA_5'] = df['Close'].ewm(span=5, adjust=False).mean()
+        df['EMA_9'] = df['Close'].ewm(span=9, adjust=False).mean()
+        df['EMA_13'] = df['Close'].ewm(span=13, adjust=False).mean()
+        df['EMA_21'] = df['Close'].ewm(span=21, adjust=False).mean()
+        
+        # 判斷多頭排列
+        df['EMA_Stacked_Bull'] = (df['EMA_5'] > df['EMA_9']) & (df['EMA_9'] > df['EMA_13']) & (df['EMA_13'] > df['EMA_21'])
+        
+        # 計算 K 線特徵
+        df['Body'] = abs(df['Close'] - df['Open'])
+        df['Lower_Wick'] = df[['Open', 'Close']].min(axis=1) - df['Low']
+        df['Upper_Wick'] = df['High'] - df[['Open', 'Close']].max(axis=1)
+        
+        # 定義十字星 / 長下影線 (下影線大於實體2倍，且大於上影線)
+        df['Is_Doji_Pinbar'] = (df['Lower_Wick'] > df['Body'] * 2) & (df['Lower_Wick'] > df['Upper_Wick'])
+        
+        return df, None
+        
+    except Exception as e:
+        return None, f"Yahoo Finance API 發生錯誤 (可能是請求過於頻繁): {str(e)}"
 
 # --- 產生交易信號 ---
 def generate_signals(df):
@@ -92,12 +111,15 @@ def generate_signals(df):
             
     return signals
 
-# --- 繪製圖表 ---
-df = load_data(ticker, days)
+# --- 執行與繪圖 ---
+with st.spinner('正在從 Yahoo Finance 獲取數據，請稍候...'):
+    df, error_msg = load_data(ticker, days)
 
-if df.empty:
-    st.error("找不到該商品的資料，請確認代號是否正確 (如外匯輸入 EURUSD=X)。")
-else:
+if error_msg:
+    # 顯示錯誤訊息 (避免紅字當機)
+    st.error(error_msg)
+    st.info("💡 提示：如果你頻繁重整頁面，Yahoo Finance 會暫時封鎖你的 IP。請等待約 5~10 分鐘後再試。")
+elif df is not None and not df.empty:
     signals = generate_signals(df)
     
     if len(signals) > 0:
@@ -147,7 +169,7 @@ else:
 
     # 圖表排版設定
     fig.update_layout(
-        title=f"{ticker} 30分鐘圖 - 三叉戟進場點標示",
+        title=f"{selected_asset} ({ticker}) 30分鐘圖 - 三叉戟進場點標示",
         yaxis_title="Price",
         xaxis_title="Time",
         template="plotly_dark",
@@ -161,4 +183,8 @@ else:
     if len(signals) > 0:
         st.markdown("### 📊 詳細信號數據")
         sig_df = pd.DataFrame(signals)
+        # 格式化顯示價格 (保留小數點)
+        sig_df['Entry'] = sig_df['Entry'].apply(lambda x: f"{x:.4f}")
+        sig_df['SL'] = sig_df['SL'].apply(lambda x: f"{x:.4f}")
+        sig_df['TP'] = sig_df['TP'].apply(lambda x: f"{x:.4f}")
         st.dataframe(sig_df)
