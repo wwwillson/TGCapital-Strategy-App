@@ -63,8 +63,14 @@ def get_data_and_signals(ticker, days):
     df_1h.loc[df_1h['Close'] > df_1h['1H_EMA20'], 'Trend'] = 'Bullish'
     df_1h.loc[df_1h['Close'] < df_1h['1H_EMA20'], 'Trend'] = 'Bearish'
     
-    # 將 1H 趨勢映射到 15m (向前填充)
-    df_15m['1H_Trend'] = df_15m.index.floor('h').map(df_1h['Trend']).ffill()
+    # 【修正錯誤的地方】
+    # 1. 先去除 df_1h 可能出現的重複索引 (yfinance 偶爾會回傳最後一根重複的K線)
+    df_1h = df_1h[~df_1h.index.duplicated(keep='last')]
+    
+    # 2. 將 15m 的 index 轉換成 pd.Series 再進行 map 和 ffill
+    floored_time_series = pd.Series(df_15m.index.floor('h'), index=df_15m.index)
+    df_15m['1H_Trend'] = floored_time_series.map(df_1h['Trend']).ffill()
+    # 【修正完畢】
     
     # 初始化欄位
     df_15m['Asian_High'] = None
