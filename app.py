@@ -2,7 +2,6 @@ import streamlit as st
 import yfinance as yf
 import pandas as pd
 import plotly.graph_objects as plotly_go
-from datetime import datetime, timedelta
 
 # ==========================================
 # 1. 網頁基本設定 & 顯示交易邏輯
@@ -40,17 +39,36 @@ timeframes = {"15 分鐘": "15m", "1 小時": "1h", "4 小時": "4h", "1 天": "
 selected_tf = st.sidebar.selectbox("選擇時間週期", list(timeframes.keys()))
 interval = timeframes[selected_tf]
 
-# 下載資料
-@st.cache_data(ttl=300) # 快取5分鐘
+# 下載資料 (加上 MultiIndex 修正與週期防呆)
+@st.cache_data(ttl=300)
 def load_data(ticker, interval):
-    # 根據週期抓取足夠的資料
-    period = "60d" if interval in["15m", "1h"] else "1y"
+    # yfinance 對歷史資料有限制：15m 最多 60天 (用 59d 防呆)，1h 最多 730天
+    if interval == "15m":
+        period = "59d"
+    elif interval in ["1h", "4h"]:
+        period = "730d"
+    else:
+        period = "1y"
+        
     df = yf.download(ticker, period=period, interval=interval)
+    
+    if df.empty:
+        return df
+
+    # 🟢 核心修復：處理 yfinance 新版本的 MultiIndex 欄位問題
+    if isinstance(df.columns, pd.MultiIndex):
+        df.columns = df.columns.get_level_values(0)
+        
     df.dropna(inplace=True)
     return df
 
 with st.spinner("載入市場數據中..."):
     df = load_data(ticker, interval)
+
+# 🟢 防呆機制：如果 Yahoo Finance 沒傳回數據，顯示提示並停止執行
+if df.empty:
+    st.warning(f"⚠️ 無法獲取 {selected_asset} 在 {selected_tf} 週期的數據。請嘗試選擇其他商品或時間週期。")
+    st.stop()
 
 # ==========================================
 # 3. 核心演算法：尋找 FVG 與模擬進場訊號
@@ -74,10 +92,10 @@ def detect_smc_signals(df):
             # 檢查後續幾根K線是否回踩且收盤於FVG外 (Step 2 & 3)
             if df['Low'].iloc[i+1] <= fvg_top and df['Close'].iloc[i+1] > fvg_top:
                 # 產生做多訊號
-                entry_price = df['Close'].iloc[i+1]
-                sl_price = df['Low'].iloc[i+1] - (entry_price * 0.001) # 止損設在信號K線低點下方
+                entry_price = float(df['Close'].iloc[i+1])
+                sl_price = float(df['Low'].iloc[i+1] - (entry_price * 0.001)) # 止損設在信號K線低點下方
                 risk = entry_price - sl_price
-                tp_price = entry_price + (risk * 2) # 1:2 盈虧比
+                tp_price = float(entry_price + (risk * 2)) # 1:2 盈虧比
                 
                 df.at[df.index[i+1], 'Signal'] = 'BUY'
                 df.at[df.index[i+1], 'Entry'] = entry_price
@@ -92,10 +110,10 @@ def detect_smc_signals(df):
             # 檢查回踩
             if df['High'].iloc[i+1] >= fvg_bottom and df['Close'].iloc[i+1] < fvg_bottom:
                 # 產生做空訊號
-                entry_price = df['Close'].iloc[i+1]
-                sl_price = df['High'].iloc[i+1] + (entry_price * 0.001) # 止損設在信號K線高點上方
+                entry_price = float(df['Close'].iloc[i+1])
+                sl_price = float(df['High'].iloc[i+1] + (entry_price * 0.001)) # 止損設在信號K線高點上方
                 risk = sl_price - entry_price
-                tp_price = entry_price - (risk * 2) # 1:2 盈虧比
+                tp_price = float(entry_price - (risk * 2)) # 1:2 盈虧比
                 
                 df.at[df.index[i+1], 'Signal'] = 'SELL'
                 df.at[df.index[i+1], 'Entry'] = entry_price
@@ -115,9 +133,9 @@ st.subheader(f"🚨 最新交易訊號 ({selected_asset})")
 if not recent_signals.empty:
     sig_time = recent_signals.index[0]
     sig_type = recent_signals['Signal'].values[0]
-    entry = recent_signals['Entry'].values[0]
-    sl = recent_signals['SL'].values[0]
-    tp = recent_signals['TP'].values[0]
+    entry = float(recent_signals['Entry'].values[0])
+    sl = float(recent_signals['SL'].values[0])
+    tp = float(recent_signals['TP'].values[0])
     
     color = "green" if sig_type == 'BUY' else "red"
     st.markdown(f"""
@@ -154,28 +172,29 @@ fig.add_trace(plotly_go.Candlestick(
 
 # 在圖表上標記訊號、止損、止盈
 for idx, row in plot_df.dropna(subset=['Signal']).iterrows():
-    # 進場點箭頭
     if row['Signal'] == 'BUY':
-        fig.add_annotation(x=idx, y=row['Low'], text="⬆ BUY", showarrow=True, arrowhead=1, arrowcolor="green", font=dict(color="green", size=14))
+        # 標註 BUY 箭頭
+        fig.add_annotation(x=idx, y=row['Low'], text="⬆ BUY", showarrow=True, arrowhead=1, arrowcolor="green", font=dict(color="green", size=14), ay=30)
     else:
-        fig.add_annotation(x=idx, y=row['High'], text="⬇ SELL", showarrow=True, arrowhead=1, arrowcolor="red", font=dict(color="red", size=14))
+        # 標註 SELL 箭頭
+        fig.add_annotation(x=idx, y=row['High'], text="⬇ SELL", showarrow=True, arrowhead=1, arrowcolor="red", font=dict(color="red", size=14), ay=-30)
     
     # 畫止損(SL)虛線
     fig.add_shape(type="line", x0=idx, y0=row['SL'], x1=plot_df.index[-1], y1=row['SL'],
                   line=dict(color="red", width=2, dash="dash"))
-    fig.add_annotation(x=plot_df.index[-5], y=row['SL'], text=f"SL: {row['SL']:.2f}", showarrow=False, font=dict(color="red"))
+    fig.add_annotation(x=plot_df.index[-1], y=row['SL'], text=f"SL: {row['SL']:.2f}", showarrow=False, font=dict(color="red", size=12), xanchor="left")
 
     # 畫止盈(TP)虛線
     fig.add_shape(type="line", x0=idx, y0=row['TP'], x1=plot_df.index[-1], y1=row['TP'],
                   line=dict(color="green", width=2, dash="dash"))
-    fig.add_annotation(x=plot_df.index[-5], y=row['TP'], text=f"TP: {row['TP']:.2f}", showarrow=False, font=dict(color="green"))
+    fig.add_annotation(x=plot_df.index[-1], y=row['TP'], text=f"TP: {row['TP']:.2f}", showarrow=False, font=dict(color="green", size=12), xanchor="left")
 
 # 圖表外觀設定
 fig.update_layout(
     xaxis_rangeslider_visible=False,
     template="plotly_dark",
     height=600,
-    margin=dict(l=0, r=0, t=30, b=0),
+    margin=dict(l=0, r=60, t=30, b=0), # 右側留白給文字
     yaxis_title="價格 (USD)"
 )
 
